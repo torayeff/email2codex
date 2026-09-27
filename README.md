@@ -12,19 +12,19 @@ uv run email2codex setup-allowlists   # once, and again after changing ALLOWED_E
 
 ## Run as a service
 
-The service starts at boot (Linux) or login (macOS) and restarts if it crashes.
+The service starts at boot (Linux) or login (macOS) and restarts if it crashes. In Activity Monitor, `ps` or `top` it appears as **`email2codex`** (launchd label `com.email2codex`, systemd unit `email2codex`).
 
 ```bash
-./service.sh install     # install and start
-./service.sh stop        # stop
-./service.sh start       # start again
-./service.sh restart     # restart, e.g. after editing .env or pulling updates
-./service.sh status      # is it running?
-./service.sh logs        # follow the log
-./service.sh uninstall   # stop and remove
+./email2codex.sh install     # install and start
+./email2codex.sh stop        # stop
+./email2codex.sh start       # start again
+./email2codex.sh restart     # restart, e.g. after editing .env or pulling updates
+./email2codex.sh status      # is it running?
+./email2codex.sh logs        # follow the log
+./email2codex.sh uninstall   # stop and remove
 ```
 
-A stopped service starts again at the next boot or login; use `uninstall` to remove it for good. Rerun `install` if you move this folder or reinstall `uv` or `codex`.
+A stopped service starts again at the next boot or login; use `uninstall` to remove it for good. Rerun `install` if you move this folder, change dependencies, or reinstall `codex`.
 
 To run it in the foreground instead: `uv run email2codex`.
 
@@ -51,6 +51,7 @@ To run it in the foreground instead: `uv run email2codex`.
 | `CODEX_ARGS` | Options for every run; the default `--dangerously-bypass-approvals-and-sandbox` means no approvals and no sandbox |
 | `CODEX_WORKDIR` | Folder Codex works in (default: this folder) |
 | `CODEX_BIN` | Path to `codex` (default: `codex` on `PATH`) |
+| Any other variable | Passed on to Codex, e.g. `AZURE_OPENAI_API_KEY` if your `~/.codex/config.toml` uses `env_key`. The service doesn't see variables from your shell profile, so put them here. |
 
 ## Security
 

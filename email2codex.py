@@ -111,23 +111,34 @@ def run_codex(thread_id: str, prompt: str, args: list[str]) -> str | None:
     cmd = [CODEX, "exec", "-C", str(WORKDIR), *CODEX_ARGS, *args, "--json", "-o", str(out), *resume, "-"]
     log.info("run: %s", shlex.join(cmd))
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     procs[thread_id] = proc
     proc.stdin.write(prompt)
     proc.stdin.close()
+    errors, other = [], []  # `--json` reports failures as events on stdout, not on stderr
     for line in proc.stdout:
-        event = json.loads(line) if line.startswith("{") else {}
-        if event.get("type") == "thread.started" and not codex_id:
-            codex_id = event["thread_id"]
-            save_session(thread_id, codex_id)
-            log.info("thread %s -> codex %s", thread_id, codex_id)
-    stderr = proc.stderr.read()
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            other.append(line.rstrip())
+            continue
+        match event.get("type"):
+            case "thread.started" if not codex_id:
+                codex_id = event["thread_id"]
+                save_session(thread_id, codex_id)
+                log.info("thread %s -> codex %s", thread_id, codex_id)
+            case "turn.failed":
+                errors.append(event.get("error", {}).get("message", "turn failed"))
+            case "error" if not event.get("message", "").startswith("Reconnecting..."):
+                errors.append(event.get("message", ""))
     result = out.read_text().strip()
     out.unlink()
     if procs.pop(thread_id, None) is None:
         return None
     if proc.wait() != 0:
-        return f"Codex exited with code {proc.returncode}.\n\n{result}\n\n{stderr[-2000:]}".strip()
+        details = "\n".join(dict.fromkeys(errors)) or "\n".join(other[-20:])  # dedupe, keep order
+        log.error("codex exited with %s: %s", proc.returncode, details)
+        return f"Codex exited with code {proc.returncode}.\n\n{details}\n\n{result}".strip()
     return result or "(Codex finished without a final message.)"
 
 

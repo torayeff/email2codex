@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run email2codex as a background service that starts at boot/login and restarts on failure.
-#   macOS: launchd agent       Linux: systemd user service
-# Usage: ./service.sh install|uninstall|start|stop|restart|status|logs
+#   macOS: launchd agent "com.email2codex"      Linux: systemd user service "email2codex"
+# The process shows up as "email2codex" in Activity Monitor / ps / top.
+# Usage: ./email2codex.sh install|uninstall|start|stop|restart|status|logs
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,22 +12,31 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 UNIT="$HOME/.config/systemd/user/$NAME.service"
 LOG="$DIR/logs/$NAME.log"
 DOMAIN="gui/$(id -u)"
+# A symlink to the venv's Python named "email2codex", so the process is listed under that name.
+LAUNCHER="$DIR/.venv/proc/$NAME"
+
+prepare() {
+  local uv
+  uv="$(command -v uv)" || { echo "uv not found in PATH" >&2; exit 1; }
+  (cd "$DIR" && "$uv" sync -q)
+  mkdir -p "$(dirname "$LAUNCHER")" "$DIR/logs"
+  ln -sf ../bin/python "$LAUNCHER"
+  # The service doesn't load your shell profile, so capture the PATH that finds codex now.
+  SERVICE_PATH="$(dirname "$(command -v codex || echo /usr/local/bin/codex)"):$(dirname "$uv"):/usr/local/bin:/usr/bin:/bin"
+}
 
 install_macos() {
-  local uv path
-  uv="$(command -v uv)" || { echo "uv not found in PATH" >&2; exit 1; }
-  # The service doesn't load your shell profile, so capture the PATH that finds uv and codex now.
-  path="$(dirname "$uv"):$(dirname "$(command -v codex || echo /usr/local/bin/codex)"):/usr/local/bin:/usr/bin:/bin"
-  mkdir -p "$DIR/logs" "$(dirname "$PLIST")"
+  prepare
+  mkdir -p "$(dirname "$PLIST")"
   cat >"$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$uv</string><string>run</string><string>$NAME</string></array>
+  <key>ProgramArguments</key><array><string>$LAUNCHER</string><string>-m</string><string>$NAME</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$path</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$SERVICE_PATH</string><key>PYTHONUNBUFFERED</key><string>1</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -38,9 +48,7 @@ EOF
 }
 
 install_linux() {
-  local uv path
-  uv="$(command -v uv)" || { echo "uv not found in PATH" >&2; exit 1; }
-  path="$(dirname "$uv"):$(dirname "$(command -v codex || echo /usr/local/bin/codex)"):/usr/local/bin:/usr/bin:/bin"
+  prepare
   mkdir -p "$(dirname "$UNIT")"
   cat >"$UNIT" <<EOF
 [Unit]
@@ -50,8 +58,9 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=$DIR
-ExecStart=$uv run $NAME
-Environment=PATH=$path
+ExecStart=$LAUNCHER -m $NAME
+Environment=PATH=$SERVICE_PATH
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=10
 

@@ -6,11 +6,13 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import urllib.request
-from email.utils import parseaddr
+from datetime import UTC, datetime
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 
 from agentmail import AgentMail, Subscribe
@@ -27,6 +29,7 @@ CODEX = os.environ.get("CODEX_BIN", "codex")
 CODEX_ARGS = shlex.split(os.environ.get("CODEX_ARGS", "--skip-git-repo-check"))
 WORKDIR = Path(os.environ.get("CODEX_WORKDIR") or Path.cwd()).expanduser().resolve()
 SESSIONS_FILE = ROOT / ".sessions.json"
+SEEN_FILE = ROOT / ".seen.json"  # processed Message-IDs, to reject replays
 ATTACHMENTS_DIR = ROOT / "attachments"
 
 DRAIN_PROMPT = "Continue: handle the follow-up message(s) queued above."
@@ -51,6 +54,34 @@ def save_session(thread_id: str, codex_id: str) -> None:
 def reply(message_id: str, text: str) -> None:
     client.inboxes.messages.reply(INBOX, message_id, text=text)
     log.info("replied to %s", message_id)
+
+
+def rejection(msg: Message) -> str | None:
+    """Return why an email must not be trusted, or None.
+
+    AgentMail drops mail whose SPF/DKIM/DMARC explicitly fails, so a forged From can't arrive.
+    A genuine DKIM-signed email can still be re-sent unchanged by anyone holding a copy, so also
+    require that it was addressed to this inbox (To/Cc are covered by the signature) and that its
+    Message-ID was never processed before.
+    """
+    if parseaddr(msg.from_)[1].lower() not in ALLOWED_EMAILS:
+        return f"sender {msg.from_} not allowed"
+    if bad := {"unauthenticated", "spam", "blocked"} & set(msg.labels or []):
+        return f"labelled {', '.join(sorted(bad))}"
+    if not msg.headers:  # websocket payloads may omit headers
+        msg = client.inboxes.messages.get(INBOX, msg.message_id)
+    headers = {k.lower(): v for k, v in (msg.headers or {}).items()}
+    recipients = [headers[k] for k in ("to", "cc") if k in headers] or [*(msg.to or []), *(msg.cc or [])]
+    if INBOX.lower() not in {addr.lower() for _, addr in getaddresses(recipients)}:
+        return f"not addressed to {INBOX} in To/Cc (possible replay of an email sent elsewhere)"
+    message_id = headers.get("message-id") or msg.message_id
+    with lock:
+        seen = json.loads(SEEN_FILE.read_text()) if SEEN_FILE.exists() else {}
+        if message_id in seen:
+            return f"replay of already processed {message_id}"
+        seen[message_id] = datetime.now(UTC).isoformat()
+        SEEN_FILE.write_text(json.dumps(seen, indent=2) + "\n")
+    return None
 
 
 def parse(msg: Message) -> tuple[str, list[str]]:
@@ -130,8 +161,8 @@ def stop(thread_id: str) -> str:
 
 
 def handle(msg: Message) -> None:
-    if parseaddr(msg.from_)[1].lower() not in ALLOWED_EMAILS:
-        log.info("ignoring %s from %s", msg.message_id, msg.from_)
+    if reason := rejection(msg):
+        log.warning("ignoring %s: %s", msg.message_id, reason)
         return
     thread_id, message_id = msg.thread_id, msg.message_id
     prompt, args = parse(msg)
@@ -158,7 +189,21 @@ def handle(msg: Message) -> None:
         (message_id, args), prompt = queued[-1], DRAIN_PROMPT
 
 
+def setup_allowlists() -> None:
+    """Allow only ALLOWED_EMAILS to reach the inbox, both as new emails and as replies."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for direction in ("receive", "reply"):
+        existing = {e.entry.lower() for e in client.inboxes.lists.list(INBOX, direction, "allow").entries}
+        for email in sorted(ALLOWED_EMAILS - existing):
+            client.inboxes.lists.create(INBOX, direction, "allow", entry=email)
+            log.info("%s allowlist: added %s", direction, email)
+        if extra := existing - ALLOWED_EMAILS:
+            log.warning("%s allowlist also allows %s (not in ALLOWED_EMAILS)", direction, ", ".join(sorted(extra)))
+
+
 def main() -> None:
+    if sys.argv[1:] == ["setup-allowlists"]:
+        return setup_allowlists()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     while True:
         try:

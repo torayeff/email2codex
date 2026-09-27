@@ -222,5 +222,7 @@ __marimo__/
 
 # email2codex
 .sessions.json
+.seen.json
+logs/
 .sessions.tmp
 attachments/

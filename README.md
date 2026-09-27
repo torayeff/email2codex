@@ -1,43 +1,65 @@
 # email2codex
 
-Use your system-installed [Codex CLI](https://github.com/openai/codex) over email, via an [AgentMail](https://agentmail.to) inbox.
+Control the [Codex CLI](https://github.com/openai/codex) on a machine by email, via an [AgentMail](https://agentmail.to) inbox. Codex runs fully autonomously and replies with its final message.
 
-Each AgentMail thread maps to one Codex session (stored in `.sessions.json`):
+## Setup
 
-| Situation | Codex command |
+```bash
+cp env.example .env                   # fill in your values
+codex login                           # once; use `codex login --device-auth` over SSH
+uv run email2codex setup-allowlists   # once, and again after changing ALLOWED_EMAILS
+```
+
+## Run as a service
+
+The service starts at boot (Linux) or login (macOS) and restarts if it crashes.
+
+```bash
+./service.sh install     # install and start
+./service.sh stop        # stop
+./service.sh start       # start again
+./service.sh restart     # restart, e.g. after editing .env or pulling updates
+./service.sh status      # is it running?
+./service.sh logs        # follow the log
+./service.sh uninstall   # stop and remove
+```
+
+A stopped service starts again at the next boot or login; use `uninstall` to remove it for good. Rerun `install` if you move this folder or reinstall `uv` or `codex`.
+
+To run it in the foreground instead: `uv run email2codex`.
+
+## Usage
+
+| You send | What happens |
 | --- | --- |
-| New email thread | `codex exec` |
-| Reply in known thread, Codex idle | `codex exec resume <session>` |
-| Reply while Codex is still running | `codex queue --thread <session>`; queued messages are picked up by one `resume` right after the current turn ends |
+| A new email | Starts a new Codex session (`codex exec`) |
+| A reply in the thread | Continues that session (`codex exec resume`) |
+| A reply while Codex is working | Queued and handled right after the current run |
+| `/stop` | Interrupts the run; replying later continues the session |
 
-When a run finishes, Codex's final message is sent back as a reply in the same thread.
+- Put the inbox in **To or Cc**, never Bcc, or the email is ignored.
+- Optional first line with `codex exec` options, e.g. `codex -m gpt-6-sol -s workspace-write`. They're added after `CODEX_ARGS`.
+- Attachments are saved to `attachments/` and their paths are given to Codex.
+- Separate threads run in parallel.
 
-- Default options for every run come from `CODEX_ARGS`. `env.example` runs Codex fully autonomously (`--dangerously-bypass-approvals-and-sandbox`: no approvals, no sandbox).
-- Optional first line: native `codex exec` options, e.g. `codex -m gpt-6-luna -c model_reasoning_effort="max" -s workspace-write`. The line is removed from the prompt and its options are added after `CODEX_ARGS`.
-- Send `/stop` to interrupt the running task in a thread. The session is kept, so replying in the thread continues it.
-- Attachments are downloaded to `attachments/<thread>/<message>/` and their paths are appended to the prompt.
-- Different email threads run in parallel.
+## Configuration (`.env`)
+
+| Variable | Meaning |
+| --- | --- |
+| `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX` | Your AgentMail key and inbox |
+| `ALLOWED_EMAILS` | Comma-separated senders allowed to control Codex |
+| `CODEX_ARGS` | Options for every run; the default `--dangerously-bypass-approvals-and-sandbox` means no approvals and no sandbox |
+| `CODEX_WORKDIR` | Folder Codex works in (default: this folder) |
+| `CODEX_BIN` | Path to `codex` (default: `codex` on `PATH`) |
 
 ## Security
 
-An email is only acted on if all of these hold:
+An email is acted on only if all of these hold:
 
-1. AgentMail accepted it: it drops mail whose SPF, DKIM or DMARC explicitly fails, and with allowlists set up (`uv run email2codex setup-allowlists`) it only accepts new emails and replies from `ALLOWED_EMAILS`.
+1. AgentMail accepted it. It drops mail that fails SPF, DKIM or DMARC, and the allowlists only let in `ALLOWED_EMAILS`.
 2. The sender is in `ALLOWED_EMAILS` and AgentMail didn't label it `unauthenticated`, `spam` or `blocked`.
-3. It is addressed to this inbox in `To` or `Cc` (not Bcc), and its `Message-ID` was never processed before (`.seen.json`, kept permanently).
+3. The inbox is in `To` or `Cc`, and the email's `Message-ID` was never processed before (`.seen.json`).
 
-Why 3: nobody can forge your From, but anyone holding a copy of a real email of yours can re-send it unchanged, and its DKIM signature still verifies (a "DKIM replay"). The signature also covers `To`/`Cc`, so an email you sent to someone else can't be redirected to the bot, and one you sent to the bot can't run twice.
+Nobody can forge your address, but anyone with a copy of a real email of yours can re-send it unchanged (a "DKIM replay"). Rule 3 blocks that: an email you sent to someone else isn't addressed to the inbox, and one you sent to the inbox can't run twice.
 
-This relies on the sender's domain publishing SPF/DKIM and a DMARC policy other than `none`. With the bypass flag Codex can do anything your user can, and it can still be misled by content it reads (prompt injection), so run it on a dedicated machine or user without credentials it doesn't need.
-
-## Run
-
-```bash
-cp env.example .env                   # fill in values
-codex login                           # once (`codex login --device-auth` over SSH)
-uv run email2codex setup-allowlists   # once, and after changing ALLOWED_EMAILS
-uv run email2codex                    # or install it as a service:
-./install-service.sh                  # start at boot/login, restart on failure
-```
-
-`install-service.sh` sets up a launchd agent on macOS (logs in `logs/email2codex.log`) or a systemd user service on Linux (`journalctl --user -u email2codex -f`, and lingering is enabled so it starts at boot without a login). It captures your current `PATH` so the service finds `uv` and `codex`; rerun it after moving either. `./install-service.sh uninstall` removes it.
+Codex has full access to the machine and can be misled by content it reads (prompt injection), so run it on a dedicated machine or user without credentials it doesn't need.
